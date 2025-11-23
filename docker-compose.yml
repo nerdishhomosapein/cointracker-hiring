@@ -1,0 +1,22 @@
+services:
+  cointracker:
+    build:
+      context: .
+      dockerfile: Dockerfile.cointracker
+    environment:
+      - ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY:-}
+    volumes:
+      - ./output:/home/appuser/output
+    command: ["fetch", "--address", "0xa39b189482f984388a34460636fea9eb181ad1a6", "--output", "/home/appuser/output/transactions.csv"]
+
+  cointracker-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.cointracker
+    environment:
+      - ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY:-}
+    volumes:
+      - ./output:/home/appuser/output
+    entrypoint: ["/bin/sh"]
+    stdin_open: true
+    tty: true

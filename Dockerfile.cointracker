@@ -1,0 +1,55 @@
+# Build stage
+FROM golang:1.24.2-alpine AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install git (needed for some Go dependencies)
+RUN apk add --no-cache git ca-certificates
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o cointracker .
+
+# Final stage - minimal image
+FROM alpine:latest
+
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates
+
+# Create non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /home/appuser
+
+# Copy binary from builder
+COPY --from=builder /app/cointracker .
+
+# Change ownership to non-root user
+RUN chown appuser:appgroup ./cointracker
+
+# Switch to non-root user
+USER appuser
+
+# Create directory for output files
+RUN mkdir -p /home/appuser/output
+
+# Set default output directory
+VOLUME ["/home/appuser/output"]
+
+# Expose port (if needed for future web interface)
+# EXPOSE 8080
+
+# Set default command
+ENTRYPOINT ["./cointracker"]
+
+# Default command shows help
+CMD ["--help"]

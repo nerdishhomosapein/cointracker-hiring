@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"sync"
 )
 
 // TransactionFetcher orchestrates fetching and normalizing transactions from a provider
@@ -30,80 +29,52 @@ func NewTransactionFetcher(provider Provider, normalizer Normalizer) *Transactio
 
 // FetchAllTransactions fetches all transaction types for an address and returns normalized transactions
 func (tf *TransactionFetcher) FetchAllTransactions(ctx context.Context, address string, startPage, endPage int) ([]*models.Transaction, error) {
-	// Fetch all transaction types concurrently
-	results := make(chan FetchResult, 5)
-	var wg sync.WaitGroup
+	// Fetch all transaction types sequentially to respect rate limits
+	var allTransactions []*models.Transaction
 
 	// Fetch normal transactions
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		txs, err := tf.fetchNormalTransactions(ctx, address, startPage, endPage)
-		results <- FetchResult{
-			Transactions: txs,
-			Err:          err,
-		}
-	}()
+	normalTxs, err := tf.fetchNormalTransactions(ctx, address, startPage, endPage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch normal transactions: %w", err)
+	}
+	if normalTxs != nil {
+		allTransactions = append(allTransactions, normalTxs...)
+	}
 
 	// Fetch internal transactions
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		txs, err := tf.fetchInternalTransactions(ctx, address, startPage, endPage)
-		results <- FetchResult{
-			Transactions: txs,
-			Err:          err,
-		}
-	}()
+	internalTxs, err := tf.fetchInternalTransactions(ctx, address, startPage, endPage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch internal transactions: %w", err)
+	}
+	if internalTxs != nil {
+		allTransactions = append(allTransactions, internalTxs...)
+	}
 
 	// Fetch ERC-20 token transfers
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		txs, err := tf.fetchTokenTransfers(ctx, address, startPage, endPage)
-		results <- FetchResult{
-			Transactions: txs,
-			Err:          err,
-		}
-	}()
+	tokenTxs, err := tf.fetchTokenTransfers(ctx, address, startPage, endPage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch token transfers: %w", err)
+	}
+	if tokenTxs != nil {
+		allTransactions = append(allTransactions, tokenTxs...)
+	}
 
 	// Fetch ERC-721 NFT transfers
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		txs, err := tf.fetchNFTTransfers(ctx, address, startPage, endPage)
-		results <- FetchResult{
-			Transactions: txs,
-			Err:          err,
-		}
-	}()
+	nftTxs, err := tf.fetchNFTTransfers(ctx, address, startPage, endPage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch NFT transfers: %w", err)
+	}
+	if nftTxs != nil {
+		allTransactions = append(allTransactions, nftTxs...)
+	}
 
 	// Fetch ERC-1155 token transfers
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		txs, err := tf.fetchERC1155Transfers(ctx, address, startPage, endPage)
-		results <- FetchResult{
-			Transactions: txs,
-			Err:          err,
-		}
-	}()
-
-	// Wait for all goroutines to complete and close results channel
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Collect results
-	var allTransactions []*models.Transaction
-	for result := range results {
-		if result.Err != nil {
-			return nil, fmt.Errorf("failed to fetch transactions: %w", result.Err)
-		}
-		if result.Transactions != nil {
-			allTransactions = append(allTransactions, result.Transactions...)
-		}
+	erc1155Txs, err := tf.fetchERC1155Transfers(ctx, address, startPage, endPage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch ERC-1155 transfers: %w", err)
+	}
+	if erc1155Txs != nil {
+		allTransactions = append(allTransactions, erc1155Txs...)
 	}
 
 	// Sort by block number and timestamp

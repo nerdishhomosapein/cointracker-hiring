@@ -1,0 +1,38 @@
+# Binaries
+cointracker*
+*.exe
+
+# Test files and artifacts
+coverage.out
+coverage.html
+
+# Development files
+.git
+.gitignore
+README.md
+IMPLEMENTATION_SUMMARY.md
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Output files
+*.csv
+output/
+
+# Vendor directory (if using vendoring)
+vendor/
+
+# Build artifacts
+*.log
+tmp/
+
+# Docker files
+Dockerfile
+.dockerignore

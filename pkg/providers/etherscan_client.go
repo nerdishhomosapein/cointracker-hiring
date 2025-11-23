@@ -12,16 +12,16 @@ import (
 )
 
 const (
-	// Etherscan API base URL
-	EtherscanBaseURL = "https://api.etherscan.io/api"
+	// Etherscan API base URL (V2)
+	EtherscanBaseURL = "https://api.etherscan.io/v2/api"
 	
 	// Default pagination
 	DefaultPageSize = 10000
 	DefaultStartBlock = 0
 	DefaultEndBlock = 99999999
 	
-	// Rate limit delays (Etherscan free tier)
-	RateLimitDelay = 200 * time.Millisecond
+	// Rate limit delays (Etherscan free tier - V2 API more restrictive)
+	RateLimitDelay = 500 * time.Millisecond
 )
 
 // EtherscanClient implements the Provider interface for Etherscan API
@@ -117,9 +117,10 @@ func (c *EtherscanClient) executeRequest(ctx context.Context, params url.Values)
 	return result, nil
 }
 
-// buildParams creates base query parameters for Etherscan API
+// buildParams creates base query parameters for Etherscan API V2
 func (c *EtherscanClient) buildParams(action, module string, address string) url.Values {
 	params := url.Values{}
+	params.Set("chainid", "1") // Ethereum mainnet
 	params.Set("apikey", c.apiKey)
 	params.Set("module", module)
 	params.Set("action", action)
