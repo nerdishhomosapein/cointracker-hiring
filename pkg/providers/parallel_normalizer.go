@@ -3,6 +3,7 @@ package providers
 import (
 	"conintracker-hiring/pkg/models"
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -11,6 +12,14 @@ type ParallelNormalizer struct {
 	normalizer  Normalizer
 	workerCount int
 	bufferSize  int
+}
+
+// NormalizationStats tracks statistics about the normalization process
+type NormalizationStats struct {
+	TotalProcessed int
+	SuccessCount   int
+	ErrorCount     int
+	Errors         []error
 }
 
 // NewParallelNormalizer creates a new parallel normalizer
@@ -36,144 +45,44 @@ func (pn *ParallelNormalizer) SetBufferSize(size int) {
 	}
 }
 
-// NormalizeTransactionsParallel normalizes transactions in parallel
-func (pn *ParallelNormalizer) NormalizeTransactionsParallel(
-	ctx context.Context,
-	normalTxs []EtherscanNormalTx,
-	internalTxs []EtherscanInternalTx,
-	tokenTxs []EtherscanTokenTx,
-	nftTxs []EtherscanTokenTx,
-	erc1155Txs []EtherscanTokenTx,
-) []*models.Transaction {
-	// Total work items
-	totalWork := len(normalTxs) + len(internalTxs) + len(tokenTxs) + len(nftTxs) + len(erc1155Txs)
-
-	// Result channel with buffering
-	resultChan := make(chan *models.Transaction, pn.bufferSize)
-
-	// WaitGroup to track goroutine completion
-	var wg sync.WaitGroup
-
-	// Helper function to normalize a slice with worker pool
-	normalizeSlice := func(
-		items interface{},
-		normalizeFunc func(interface{}) *models.Transaction,
-		count int,
-	) {
-		if count == 0 {
-			return
-		}
-
-		wg.Add(1)
-		go pn.normalizeWorkerPool(ctx, items, normalizeFunc, count, resultChan, &wg)
-	}
-
-	// Spawn workers for each transaction type
-	normalizeSlice(normalTxs, func(item interface{}) *models.Transaction {
-		if tx, ok := item.(EtherscanNormalTx); ok {
-			result, _ := pn.normalizer.NormalizeNormalTx(tx)
-			return result
-		}
-		return nil
-	}, len(normalTxs))
-
-	normalizeSlice(internalTxs, func(item interface{}) *models.Transaction {
-		if tx, ok := item.(EtherscanInternalTx); ok {
-			result, _ := pn.normalizer.NormalizeInternalTx(tx)
-			return result
-		}
-		return nil
-	}, len(internalTxs))
-
-	normalizeSlice(tokenTxs, func(item interface{}) *models.Transaction {
-		if tx, ok := item.(EtherscanTokenTx); ok {
-			result, _ := pn.normalizer.NormalizeERC20Tx(tx)
-			return result
-		}
-		return nil
-	}, len(tokenTxs))
-
-	normalizeSlice(nftTxs, func(item interface{}) *models.Transaction {
-		if tx, ok := item.(EtherscanTokenTx); ok {
-			result, _ := pn.normalizer.NormalizeERC721Tx(tx)
-			return result
-		}
-		return nil
-	}, len(nftTxs))
-
-	normalizeSlice(erc1155Txs, func(item interface{}) *models.Transaction {
-		if tx, ok := item.(EtherscanTokenTx); ok {
-			result, _ := pn.normalizer.NormalizeERC1155Tx(tx)
-			return result
-		}
-		return nil
-	}, len(erc1155Txs))
-
-	// Close result channel when all workers complete
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect results
-	result := make([]*models.Transaction, 0, totalWork)
-	for tx := range resultChan {
-		if tx != nil {
-			result = append(result, tx)
-		}
-	}
-
-	return result
+// NormalizationResult holds both successful transactions and error information
+type NormalizationResult struct {
+	Transactions []*models.Transaction
+	Stats        NormalizationStats
 }
 
-// normalizeWorkerPool processes items with a pool of workers
-func (pn *ParallelNormalizer) normalizeWorkerPool(
+// normalizeWorkerPoolTyped is a type-safe worker pool using generics
+func normalizeWorkerPoolTyped[T any](
 	ctx context.Context,
-	items interface{},
-	normalizeFunc func(interface{}) *models.Transaction,
-	count int,
-	resultChan chan *models.Transaction,
+	items []T,
+	normalizeFunc func(T) (*models.Transaction, error),
+	workerCount int,
+	resultChan chan<- *models.Transaction,
+	statsChan chan<- NormalizationStats,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
 
-	// Create work queue
-	workQueue := make(chan interface{}, count)
+	workQueue := make(chan T, len(items))
 
-	// Populate work queue based on type
+	// Populate work queue
 	go func() {
-		switch v := items.(type) {
-		case []EtherscanNormalTx:
-			for _, item := range v {
-				select {
-				case workQueue <- item:
-				case <-ctx.Done():
-					return
-				}
-			}
-		case []EtherscanInternalTx:
-			for _, item := range v {
-				select {
-				case workQueue <- item:
-				case <-ctx.Done():
-					return
-				}
-			}
-		case []EtherscanTokenTx:
-			for _, item := range v {
-				select {
-				case workQueue <- item:
-				case <-ctx.Done():
-					return
-				}
+		defer close(workQueue)
+		for _, item := range items {
+			select {
+			case workQueue <- item:
+			case <-ctx.Done():
+				return
 			}
 		}
-		close(workQueue)
 	}()
 
 	// Spawn worker goroutines
 	var workerWg sync.WaitGroup
-	for i := 0; i < pn.workerCount; i++ {
+	var statsMutex sync.Mutex
+	stats := NormalizationStats{}
+
+	for i := 0; i < workerCount; i++ {
 		workerWg.Add(1)
 		go func() {
 			defer workerWg.Done()
@@ -182,13 +91,23 @@ func (pn *ParallelNormalizer) normalizeWorkerPool(
 				case <-ctx.Done():
 					return
 				default:
-					if result := normalizeFunc(item); result != nil {
+					result, err := normalizeFunc(item)
+					
+					statsMutex.Lock()
+					stats.TotalProcessed++
+					if err != nil {
+						stats.ErrorCount++
+						stats.Errors = append(stats.Errors, fmt.Errorf("normalization failed: %w", err))
+					} else if result != nil {
+						stats.SuccessCount++
 						select {
 						case resultChan <- result:
 						case <-ctx.Done():
+							statsMutex.Unlock()
 							return
 						}
 					}
+					statsMutex.Unlock()
 				}
 			}
 		}()
@@ -196,7 +115,106 @@ func (pn *ParallelNormalizer) normalizeWorkerPool(
 
 	// Wait for all workers to complete
 	workerWg.Wait()
+	
+	// Send stats
+	select {
+	case statsChan <- stats:
+	case <-ctx.Done():
+	}
 }
+
+// NormalizeTransactionsParallel normalizes transactions in parallel with error tracking
+func (pn *ParallelNormalizer) NormalizeTransactionsParallel(
+	ctx context.Context,
+	normalTxs []EtherscanNormalTx,
+	internalTxs []EtherscanInternalTx,
+	tokenTxs []EtherscanTokenTx,
+	nftTxs []EtherscanTokenTx,
+	erc1155Txs []EtherscanTokenTx,
+) *NormalizationResult {
+	// Total work items
+	totalWork := len(normalTxs) + len(internalTxs) + len(tokenTxs) + len(nftTxs) + len(erc1155Txs)
+
+	// Result channel with buffering
+	resultChan := make(chan *models.Transaction, pn.bufferSize)
+	statsChan := make(chan NormalizationStats, 5) // 5 transaction types
+
+	// WaitGroup to track goroutine completion
+	var wg sync.WaitGroup
+
+	// Process each transaction type with type-safe workers
+	if len(normalTxs) > 0 {
+		wg.Add(1)
+		go normalizeWorkerPoolTyped(ctx, normalTxs, pn.normalizer.NormalizeNormalTx, 
+			pn.workerCount, resultChan, statsChan, &wg)
+	}
+
+	if len(internalTxs) > 0 {
+		wg.Add(1)
+		go normalizeWorkerPoolTyped(ctx, internalTxs, pn.normalizer.NormalizeInternalTx, 
+			pn.workerCount, resultChan, statsChan, &wg)
+	}
+
+	if len(tokenTxs) > 0 {
+		wg.Add(1)
+		go normalizeWorkerPoolTyped(ctx, tokenTxs, pn.normalizer.NormalizeERC20Tx, 
+			pn.workerCount, resultChan, statsChan, &wg)
+	}
+
+	if len(nftTxs) > 0 {
+		wg.Add(1)
+		go normalizeWorkerPoolTyped(ctx, nftTxs, pn.normalizer.NormalizeERC721Tx, 
+			pn.workerCount, resultChan, statsChan, &wg)
+	}
+
+	if len(erc1155Txs) > 0 {
+		wg.Add(1)
+		go normalizeWorkerPoolTyped(ctx, erc1155Txs, pn.normalizer.NormalizeERC1155Tx, 
+			pn.workerCount, resultChan, statsChan, &wg)
+	}
+
+	// Close channels when all workers complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+		close(statsChan)
+	}()
+
+	// Collect results and stats
+	result := make([]*models.Transaction, 0, totalWork)
+	aggregateStats := NormalizationStats{}
+
+	done := false
+	for !done {
+		select {
+		case tx, ok := <-resultChan:
+			if !ok {
+				resultChan = nil
+			} else if tx != nil {
+				result = append(result, tx)
+			}
+		case stats, ok := <-statsChan:
+			if !ok {
+				statsChan = nil
+			} else {
+				aggregateStats.TotalProcessed += stats.TotalProcessed
+				aggregateStats.SuccessCount += stats.SuccessCount
+				aggregateStats.ErrorCount += stats.ErrorCount
+				aggregateStats.Errors = append(aggregateStats.Errors, stats.Errors...)
+			}
+		}
+		
+		if resultChan == nil && statsChan == nil {
+			done = true
+		}
+	}
+
+	return &NormalizationResult{
+		Transactions: result,
+		Stats:        aggregateStats,
+	}
+}
+
 
 // StreamNormalizeResults returns a channel of normalized transactions for streaming processing
 func (pn *ParallelNormalizer) StreamNormalizeResults(
@@ -212,59 +230,17 @@ func (pn *ParallelNormalizer) StreamNormalizeResults(
 	go func() {
 		defer close(resultChan)
 
-		var wg sync.WaitGroup
-
-		// Helper to normalize slice and stream results
-		streamSlice := func(items interface{}, normalizeFunc func(interface{}) *models.Transaction, count int) {
-			if count == 0 {
+		// Reuse the new type-safe implementation but discard error stats for streaming
+		result := pn.NormalizeTransactionsParallel(ctx, normalTxs, internalTxs, tokenTxs, nftTxs, erc1155Txs)
+		
+		// Stream the results
+		for _, tx := range result.Transactions {
+			select {
+			case resultChan <- tx:
+			case <-ctx.Done():
 				return
 			}
-			wg.Add(1)
-			go pn.normalizeWorkerPool(ctx, items, normalizeFunc, count, resultChan, &wg)
 		}
-
-		// Spawn workers
-		streamSlice(normalTxs, func(item interface{}) *models.Transaction {
-			if tx, ok := item.(EtherscanNormalTx); ok {
-				result, _ := pn.normalizer.NormalizeNormalTx(tx)
-				return result
-			}
-			return nil
-		}, len(normalTxs))
-
-		streamSlice(internalTxs, func(item interface{}) *models.Transaction {
-			if tx, ok := item.(EtherscanInternalTx); ok {
-				result, _ := pn.normalizer.NormalizeInternalTx(tx)
-				return result
-			}
-			return nil
-		}, len(internalTxs))
-
-		streamSlice(tokenTxs, func(item interface{}) *models.Transaction {
-			if tx, ok := item.(EtherscanTokenTx); ok {
-				result, _ := pn.normalizer.NormalizeERC20Tx(tx)
-				return result
-			}
-			return nil
-		}, len(tokenTxs))
-
-		streamSlice(nftTxs, func(item interface{}) *models.Transaction {
-			if tx, ok := item.(EtherscanTokenTx); ok {
-				result, _ := pn.normalizer.NormalizeERC721Tx(tx)
-				return result
-			}
-			return nil
-		}, len(nftTxs))
-
-		streamSlice(erc1155Txs, func(item interface{}) *models.Transaction {
-			if tx, ok := item.(EtherscanTokenTx); ok {
-				result, _ := pn.normalizer.NormalizeERC1155Tx(tx)
-				return result
-			}
-			return nil
-		}, len(erc1155Txs))
-
-		wg.Wait()
 	}()
 
 	return resultChan

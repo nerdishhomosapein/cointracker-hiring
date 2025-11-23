@@ -119,22 +119,32 @@ func NewBenchmarkFixtures(size int) *BenchmarkFixtures {
 // padHex pads an integer to a hex string of specified length with leading zeros
 func padHex(i int, length int) string {
 	hexStr := ""
-	for j := 0; j < length; j++ {
-		hexStr += string(rune(((i + j) % 16)))
-		if (i + j) % 16 < 10 {
-			hexStr = hexStr[:len(hexStr)-1] + string(rune(48+(i+j)%16))
-		} else {
-			hexStr = hexStr[:len(hexStr)-1] + string(rune(97+((i+j)%16)-10))
+	num := i
+	if num == 0 {
+		hexStr = "0"
+	} else {
+		for num > 0 {
+			digit := num % 16
+			if digit < 10 {
+				hexStr = string(rune(48+digit)) + hexStr
+			} else {
+				hexStr = string(rune(97+digit-10)) + hexStr
+			}
+			num /= 16
 		}
 	}
-	if len(hexStr) < length {
-		padding := ""
-		for j := len(hexStr); j < length; j++ {
-			padding += "0"
-		}
-		hexStr = padding + hexStr
+	
+	// Pad with leading zeros if needed
+	for len(hexStr) < length {
+		hexStr = "0" + hexStr
 	}
-	return hexStr[:length]
+	
+	// Truncate if too long
+	if len(hexStr) > length {
+		hexStr = hexStr[len(hexStr)-length:]
+	}
+	
+	return hexStr
 }
 
 // padDecimal pads an integer to a decimal string

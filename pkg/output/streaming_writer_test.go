@@ -38,7 +38,9 @@ func BenchmarkStreamingCSVWriter(b *testing.B) {
 			writer := NewStreamingCSVWriter(buf)
 			ctx := context.Background()
 			txChan := generateTransactions(1000)
-			writer.WriteStream(ctx, txChan, nil)
+			if err := writer.WriteStream(ctx, txChan, nil); err != nil {
+				b.Fatalf("WriteStream failed: %v", err)
+			}
 		}
 	})
 
@@ -49,7 +51,9 @@ func BenchmarkStreamingCSVWriter(b *testing.B) {
 			writer := NewStreamingCSVWriter(buf)
 			ctx := context.Background()
 			txChan := generateTransactions(10000)
-			writer.WriteStream(ctx, txChan, nil)
+			if err := writer.WriteStream(ctx, txChan, nil); err != nil {
+				b.Fatalf("WriteStream failed: %v", err)
+			}
 		}
 	})
 }
@@ -83,9 +87,11 @@ func BenchmarkStreamingWithProgress(b *testing.B) {
 		txChan := generateTransactions(1000)
 
 		progressCount := 0
-		writer.WriteStream(ctx, txChan, func(count int) {
+		if err := writer.WriteStream(ctx, txChan, func(count int) {
 			progressCount = count
-		})
+		}); err != nil {
+			b.Fatalf("WriteStream failed: %v", err)
+		}
 		_ = progressCount
 	}
 }

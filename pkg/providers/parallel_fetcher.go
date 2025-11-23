@@ -20,10 +20,11 @@ type ParallelFetcher struct {
 
 // FetchTypeResult holds the result of fetching a specific transaction type
 type FetchTypeResult struct {
-	TxType TransactionType
-	Txs    []*models.Transaction
-	Err    error
-	Count  int
+	TxType             TransactionType
+	Txs                []*models.Transaction
+	Err                error
+	Count              int
+	NormalizationStats NormalizationStats // Track normalization errors
 }
 
 // TransactionType enum for identifying fetch type
@@ -93,7 +94,7 @@ func (pf *ParallelFetcher) FetchAllTransactionsParallel(
 	var wg sync.WaitGroup
 
 	// Helper function to wrap fetch operations with semaphore
-	fetchWithSemaphore := func(fetchFunc func() (*FetchTypeResult), txType TransactionType) {
+	fetchWithSemaphore := func(fetchFunc func(context.Context) (*FetchTypeResult), txType TransactionType) {
 		defer wg.Done()
 
 		// Acquire semaphore slot
@@ -105,29 +106,31 @@ func (pf *ParallelFetcher) FetchAllTransactionsParallel(
 		defer cancel()
 
 		// Execute fetch in goroutine
-		resultChan <- pf.executeFetch(fetchCtx, fetchFunc, txType)
+		resultChan <- pf.executeFetch(fetchCtx, func() *FetchTypeResult {
+			return fetchFunc(fetchCtx)
+		}, txType)
 	}
 
 	// Launch all fetch operations
 	wg.Add(5)
-	go fetchWithSemaphore(func() *FetchTypeResult {
-		return pf.fetchNormalTransactionsConcurrent(ctx, address, startPage, endPage)
+	go fetchWithSemaphore(func(fetchCtx context.Context) *FetchTypeResult {
+		return pf.fetchNormalTransactionsConcurrent(fetchCtx, address, startPage, endPage)
 	}, TxTypeNormal)
 
-	go fetchWithSemaphore(func() *FetchTypeResult {
-		return pf.fetchInternalTransactionsConcurrent(ctx, address, startPage, endPage)
+	go fetchWithSemaphore(func(fetchCtx context.Context) *FetchTypeResult {
+		return pf.fetchInternalTransactionsConcurrent(fetchCtx, address, startPage, endPage)
 	}, TxTypeInternal)
 
-	go fetchWithSemaphore(func() *FetchTypeResult {
-		return pf.fetchTokenTransfersConcurrent(ctx, address, startPage, endPage)
+	go fetchWithSemaphore(func(fetchCtx context.Context) *FetchTypeResult {
+		return pf.fetchTokenTransfersConcurrent(fetchCtx, address, startPage, endPage)
 	}, TxTypeToken)
 
-	go fetchWithSemaphore(func() *FetchTypeResult {
-		return pf.fetchNFTTransfersConcurrent(ctx, address, startPage, endPage)
+	go fetchWithSemaphore(func(fetchCtx context.Context) *FetchTypeResult {
+		return pf.fetchNFTTransfersConcurrent(fetchCtx, address, startPage, endPage)
 	}, TxTypeNFT)
 
-	go fetchWithSemaphore(func() *FetchTypeResult {
-		return pf.fetchERC1155TransfersConcurrent(ctx, address, startPage, endPage)
+	go fetchWithSemaphore(func(fetchCtx context.Context) *FetchTypeResult {
+		return pf.fetchERC1155TransfersConcurrent(fetchCtx, address, startPage, endPage)
 	}, TxTypeERC1155)
 
 	// Close result channel when all operations complete
@@ -150,7 +153,7 @@ func (pf *ParallelFetcher) FetchAllTransactionsParallel(
 		}
 	}
 
-	// If all fetches failed, return error
+	// If all fetches failed, return error with no data
 	if len(errors) == 5 {
 		return nil, fmt.Errorf("all transaction fetches failed: %v", errors)
 	}
@@ -158,6 +161,11 @@ func (pf *ParallelFetcher) FetchAllTransactionsParallel(
 	// Sort all transactions
 	if len(allTransactions) > 0 {
 		sort.Sort(models.TransactionList(allTransactions))
+	}
+
+	// If some fetches failed, return partial data with error indicating failures
+	if len(errors) > 0 {
+		return allTransactions, fmt.Errorf("partial fetch failures occurred: %v", errors)
 	}
 
 	return allTransactions, nil
@@ -199,16 +207,24 @@ func (pf *ParallelFetcher) fetchNormalTransactionsConcurrent(
 	}
 
 	var normalized []*models.Transaction
+	stats := NormalizationStats{}
+
 	for _, tx := range rawTxs {
-		if norm, err := pf.normalizer.NormalizeNormalTx(tx); err == nil {
+		stats.TotalProcessed++
+		if norm, err := pf.normalizer.NormalizeNormalTx(tx); err != nil {
+			stats.ErrorCount++
+			stats.Errors = append(stats.Errors, fmt.Errorf("failed to normalize normal transaction %s: %w", tx.Hash, err))
+		} else if norm != nil {
+			stats.SuccessCount++
 			normalized = append(normalized, norm)
 		}
 	}
 
 	return &FetchTypeResult{
-		TxType: TxTypeNormal,
-		Txs:    normalized,
-		Count:  len(normalized),
+		TxType:             TxTypeNormal,
+		Txs:                normalized,
+		Count:              len(normalized),
+		NormalizationStats: stats,
 	}
 }
 
@@ -224,16 +240,24 @@ func (pf *ParallelFetcher) fetchInternalTransactionsConcurrent(
 	}
 
 	var normalized []*models.Transaction
+	stats := NormalizationStats{}
+
 	for _, tx := range rawTxs {
-		if norm, err := pf.normalizer.NormalizeInternalTx(tx); err == nil {
+		stats.TotalProcessed++
+		if norm, err := pf.normalizer.NormalizeInternalTx(tx); err != nil {
+			stats.ErrorCount++
+			stats.Errors = append(stats.Errors, fmt.Errorf("failed to normalize internal transaction %s: %w", tx.Hash, err))
+		} else if norm != nil {
+			stats.SuccessCount++
 			normalized = append(normalized, norm)
 		}
 	}
 
 	return &FetchTypeResult{
-		TxType: TxTypeInternal,
-		Txs:    normalized,
-		Count:  len(normalized),
+		TxType:             TxTypeInternal,
+		Txs:                normalized,
+		Count:              len(normalized),
+		NormalizationStats: stats,
 	}
 }
 
@@ -249,16 +273,24 @@ func (pf *ParallelFetcher) fetchTokenTransfersConcurrent(
 	}
 
 	var normalized []*models.Transaction
+	stats := NormalizationStats{}
+
 	for _, tx := range rawTxs {
-		if norm, err := pf.normalizer.NormalizeERC20Tx(tx); err == nil {
+		stats.TotalProcessed++
+		if norm, err := pf.normalizer.NormalizeERC20Tx(tx); err != nil {
+			stats.ErrorCount++
+			stats.Errors = append(stats.Errors, fmt.Errorf("failed to normalize token transaction %s: %w", tx.Hash, err))
+		} else if norm != nil {
+			stats.SuccessCount++
 			normalized = append(normalized, norm)
 		}
 	}
 
 	return &FetchTypeResult{
-		TxType: TxTypeToken,
-		Txs:    normalized,
-		Count:  len(normalized),
+		TxType:             TxTypeToken,
+		Txs:                normalized,
+		Count:              len(normalized),
+		NormalizationStats: stats,
 	}
 }
 
@@ -274,16 +306,24 @@ func (pf *ParallelFetcher) fetchNFTTransfersConcurrent(
 	}
 
 	var normalized []*models.Transaction
+	stats := NormalizationStats{}
+
 	for _, tx := range rawTxs {
-		if norm, err := pf.normalizer.NormalizeERC721Tx(tx); err == nil {
+		stats.TotalProcessed++
+		if norm, err := pf.normalizer.NormalizeERC721Tx(tx); err != nil {
+			stats.ErrorCount++
+			stats.Errors = append(stats.Errors, fmt.Errorf("failed to normalize NFT transaction %s: %w", tx.Hash, err))
+		} else if norm != nil {
+			stats.SuccessCount++
 			normalized = append(normalized, norm)
 		}
 	}
 
 	return &FetchTypeResult{
-		TxType: TxTypeNFT,
-		Txs:    normalized,
-		Count:  len(normalized),
+		TxType:             TxTypeNFT,
+		Txs:                normalized,
+		Count:              len(normalized),
+		NormalizationStats: stats,
 	}
 }
 
@@ -299,15 +339,23 @@ func (pf *ParallelFetcher) fetchERC1155TransfersConcurrent(
 	}
 
 	var normalized []*models.Transaction
+	stats := NormalizationStats{}
+
 	for _, tx := range rawTxs {
-		if norm, err := pf.normalizer.NormalizeERC1155Tx(tx); err == nil {
+		stats.TotalProcessed++
+		if norm, err := pf.normalizer.NormalizeERC1155Tx(tx); err != nil {
+			stats.ErrorCount++
+			stats.Errors = append(stats.Errors, fmt.Errorf("failed to normalize ERC1155 transaction %s: %w", tx.Hash, err))
+		} else if norm != nil {
+			stats.SuccessCount++
 			normalized = append(normalized, norm)
 		}
 	}
 
 	return &FetchTypeResult{
-		TxType: TxTypeERC1155,
-		Txs:    normalized,
-		Count:  len(normalized),
+		TxType:             TxTypeERC1155,
+		Txs:                normalized,
+		Count:              len(normalized),
+		NormalizationStats: stats,
 	}
 }

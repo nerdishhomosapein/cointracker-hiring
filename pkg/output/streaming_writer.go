@@ -46,10 +46,10 @@ func (scw *StreamingCSVWriter) SetFlushInterval(interval time.Duration) {
 }
 
 // WriteStream reads transactions from a channel and writes them to CSV
-// Returns error if writing fails; returns nil on context cancellation
+// Returns error if writing fails; returns ctx.Err() on context cancellation
 func (scw *StreamingCSVWriter) WriteStream(
 	ctx context.Context,
-	txChan chan *models.Transaction,
+	txChan <-chan *models.Transaction,
 	onProgress func(count int),
 ) error {
 	// Write header once
@@ -80,6 +80,9 @@ func (scw *StreamingCSVWriter) WriteStream(
 					return fmt.Errorf("failed to write final batch: %w", err)
 				}
 				scw.mu.Unlock()
+				if onProgress != nil {
+					onProgress(count)
+				}
 			}
 			return ctx.Err()
 
@@ -93,6 +96,9 @@ func (scw *StreamingCSVWriter) WriteStream(
 						return fmt.Errorf("failed to write final batch: %w", err)
 					}
 					scw.mu.Unlock()
+					if onProgress != nil {
+						onProgress(count)
+					}
 				}
 				// Flush all remaining data
 				scw.mu.Lock()

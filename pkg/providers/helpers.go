@@ -1,5 +1,7 @@
 package providers
 
+import "time"
+
 // These functions expose internal normalizer helpers for benchmarking and testing purposes
 
 // WeiToETH is the public wrapper for weiToETH
@@ -23,6 +25,6 @@ func ParseUint64Public(s string) uint64 {
 }
 
 // ParseTimestampPublic is the public wrapper for parseTimestamp
-func ParseTimestampPublic(timestampStr string) interface{} {
+func ParseTimestampPublic(timestampStr string) time.Time {
 	return parseTimestamp(timestampStr)
 }
